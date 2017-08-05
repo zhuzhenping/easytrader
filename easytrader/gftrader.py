@@ -12,6 +12,7 @@ import six
 
 from . import helpers
 from .log import log
+from .webtrader import NotLoginError
 from .webtrader import WebTrader
 
 VERIFY_CODE_POS = 0
@@ -25,14 +26,20 @@ SZ = 1
 class GFTrader(WebTrader):
     config_path = os.path.dirname(__file__) + '/config/gf.json'
 
-    def __init__(self):
-        super(GFTrader, self).__init__()
+    def __init__(self, debug=True):
+        super(GFTrader, self).__init__(debug=debug)
         self.cookie = None
         self.account_config = None
         self.s = None
         self.exchange_stock_account = dict()
         self.sessionid = ''
         self.holdername = list()
+
+    def _prepare_account(self, user, password, **kwargs):
+        self.account_config = {
+            'username': user,
+            'password': password
+        }
 
     def __handle_recognize_code(self):
         """获取并识别返回的验证码
@@ -83,7 +90,7 @@ class GFTrader(WebTrader):
         )
         login_response = self.s.post(self.config['login_api'], params=login_params)
         log.info('login response: {}'.format(login_response.text))
-        if login_response.json()['success'] == True:
+        if login_response.json()['success'] is True:
             v = login_response.headers
             self.sessionid = v['Set-Cookie'][-SESSIONIDPOS:]
             self.__set_trade_need_info()
@@ -115,7 +122,15 @@ class GFTrader(WebTrader):
             return_data = json.loads(str(data, 'utf-8'))
         return return_data
 
+    def check_login_status(self, response):
+        if response is None or (not response.get('success') == True):
+            self.heart_active = False
+            raise NotLoginError
+
     def check_account_live(self, response):
+        if response is None or (not response.get('success') == True):
+            self.heart_active = False
+            raise NotLoginError
         if hasattr(response, 'data') and response.get('error_no') == '-1':
             self.heart_active = False
 
@@ -169,7 +184,7 @@ class GFTrader(WebTrader):
         params = dict(
             self.config['buy'],
             entrust_amount=amount if amount else volume // price // 100 * 100,
-            entrust_prop=entrust_prop
+            entrust_prop=0
         )
         return self.__trade(stock_code, price, other=params)
 
@@ -382,12 +397,14 @@ class GFTrader(WebTrader):
         return self.do(params)
 
     def __trade(self, stock_code, price, other):
+        # 检查是否已经掉线
+        self.check_login(1)
         need_info = self.__get_trade_need_info(stock_code)
         trade_param = dict(
             other,
             stock_account=need_info['stock_account'],
             exchange_type=need_info['exchange_type'],
-            stock_code=stock_code,
+            stock_code=stock_code[-6:],
             entrust_price=price,
             dse_sessionId=self.sessionid
         )
@@ -541,7 +558,7 @@ class GFTrader(WebTrader):
         log.debug(self.do(params))
         self.heart_active = False
 
-    def get_entrust(self, action_in=0):
+    def get_entrust_without_pos(self, action_in=0):
         '''
 
         :param action_in: 当值为0，返回全部委托；当值为1时，返回可撤委托
@@ -552,3 +569,50 @@ class GFTrader(WebTrader):
             "action_in": action_in,
         })
         return self.do(params)
+
+    def get_entrust(self, action_in):
+        '''
+
+        :param action_in: 当值为0，返回全部委托；当值为1时，返回可撤委托
+        :return: 字典形式的返回值
+        '''
+        data, total = self.get_value(action_in)
+        return {u'data': data, u'total': total, u'success': True}
+
+    def get_entrust_with_pos(self, postion_str):
+        '''
+
+        :param position_str: 用于标记查询委托单号的起点
+        :return: 字典形式的返回值
+        '''
+        params = self.config['entrust_pos'].copy()
+        params.update({
+            "postion_str": postion_str,
+        })
+        return self.do(params)
+
+    def get_value(self, action_in):
+        '''
+        1.委托数量在100单以下，直接返回值
+        2.查询委托的数量等于100单，调用带position_str参数的委托查询方法
+        3.直到最后一次的查询返回值小于100单，结束循环，构造返回值
+
+        :param action_in: 当值为0，返回全部委托；当值为1时，返回可撤委托
+        :return:（数据列表，数据总数）构成的元组
+        '''
+        data = []
+        total = 0
+
+        result = self.get_entrust_without_pos(action_in)
+
+        while True:
+            data += result[u'data']
+            total += result[u'total']
+
+            if result[u'total'] < 100:
+                break
+            result = self.get_entrust_with_pos(
+                action_in, result[u'data'][-1]['position_str']
+            )
+
+        return data, total

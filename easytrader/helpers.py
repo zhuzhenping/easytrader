@@ -9,22 +9,16 @@ import ssl
 import sys
 import uuid
 
+import requests
 import six
 from requests.adapters import HTTPAdapter
 from requests.packages.urllib3.poolmanager import PoolManager
+from six.moves import input
 
 from .log import log
 
-from .thirdlibrary.yjb_captcha import YJBCaptcha
-
-
 if six.PY2:
     from io import open
-
-
-class EntrustProp(object):
-    Limit = 'limit'
-    Market = 'market'
 
 
 class Ssl3HttpAdapter(HTTPAdapter):
@@ -48,7 +42,7 @@ def get_stock_type(stock_code):
     ['5', '6', '9'] 开头的为 sh， 其余为 sz
     :param stock_code:股票ID, 若以 'sz', 'sh' 开头直接返回对应类型，否则使用内置规则判断
     :return 'sh' or 'sz'"""
-    assert type(stock_code) is str, 'stock code need str type'
+    stock_code = str(stock_code)
     if stock_code.startswith(('sh', 'sz')):
         return stock_code[:2]
     if stock_code.startswith(('50', '51', '60', '73', '90', '110', '113', '132', '204', '78')):
@@ -88,24 +82,32 @@ def recognize_verify_code(image_path, broker='ht'):
         return detect_gf_result(image_path)
     elif broker == 'yh':
         return detect_yh_result(image_path)
+    elif broker == 'xczq':
+        return default_verify_code_detect(image_path)
+    elif broker == 'yh_client':
+        return detect_yh_client_result(image_path)
     # 调用 tesseract 识别
     return default_verify_code_detect(image_path)
 
 
-def detect_ht_result(image_path):
-    code = detect_verify_code_by_java(image_path, 'ht')
-    if not code:
-        return default_verify_code_detect(image_path)
-    return code
+def detect_yh_client_result(image_path):
+    """封装了tesseract的识别，部署在阿里云上，服务端源码地址为： https://github.com/shidenggui/yh_verify_code_docker"""
+    api = 'http://123.56.157.162:5000/yh_client'
+    with open(image_path, 'rb') as f:
+        rep = requests.post(api, files={
+            'image': f
+        })
+    if rep.status_code != 201:
+        error = rep.json()['message']
+        raise Exception('request {} error: {]'.format(api, error))
+    return rep.json()['result']
 
 
-def detect_yjb_result(image_path):
-    captcha = YJBCaptcha(imagePath=image_path)
-    code = captcha.string()
-    if not code:
-        code = detect_verify_code_by_java(image_path, 'yjb')
-    elif not code:
-        return default_verify_code_detect(image_path)
+def input_verify_code_manual(image_path):
+    from PIL import Image
+    image = Image.open(image_path)
+    image.show()
+    code = input('image path: {}, input verify code answer:'.format(image_path))
     return code
 
 
@@ -167,24 +169,19 @@ def detect_gf_result(image_path):
 
 
 def detect_yh_result(image_path):
-    from PIL import Image
-
-    img = Image.open(image_path)
-
-    brightness = list()
-    for x in range(img.width):
-        for y in range(img.height):
-            (r, g, b) = img.getpixel((x, y))
-            brightness.append(r + g + b)
-    avg_brightness = sum(brightness) // len(brightness)
-
-    for x in range(img.width):
-        for y in range(img.height):
-            (r, g, b) = img.getpixel((x, y))
-            if ((r + g + b) > avg_brightness / 1.5) or (y < 3) or (y > 17) or (x < 5) or (x > (img.width - 5)):
-                img.putpixel((x, y), (256, 256, 256))
-
-    return invoke_tesseract_to_recognize(img)
+    """封装了tesseract的中文识别，部署在阿里云上，服务端源码地址为： https://github.com/shidenggui/yh_verify_code_docker"""
+    api = 'http://123.56.157.162:5000/yh'
+    with open(image_path, 'rb') as f:
+        try:
+            rep = requests.post(api, files={
+                'image': f
+            })
+            if rep.status_code != 200:
+                raise Exception('request {} error'.format(api))
+        except Exception as e:
+            log.error('自动识别银河验证码失败: {}, 请手动输入验证码'.format(e))
+            return input_verify_code_manual(image_path)
+    return rep.text
 
 
 def invoke_tesseract_to_recognize(img):

@@ -1,14 +1,16 @@
 # coding: utf-8
-from __future__ import division
+from __future__ import division, unicode_literals
 
+import math
+import logging
 import os
 import random
 import re
+import time
 
 import requests
 
 from . import helpers
-from .helpers import EntrustProp
 from .log import log
 from .webtrader import WebTrader, NotLoginError
 
@@ -31,8 +33,8 @@ def slice_list(step=None, num=None, data_list=None):
 class YHTrader(WebTrader):
     config_path = os.path.dirname(__file__) + '/config/yh.json'
 
-    def __init__(self):
-        super(YHTrader, self).__init__()
+    def __init__(self, debug=True):
+        super(YHTrader, self).__init__(debug=debug)
         self.cookie = None
         self.account_config = None
         self.s = None
@@ -41,10 +43,11 @@ class YHTrader(WebTrader):
     def login(self, throw=False):
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 6.1; WOW64; Trident/7.0; rv:11.0) like Gecko',
+            'Referer': 'https://www.chinastock.com.cn/trade/webtrade/login.jsp'
         }
         if self.s is not None:
             self.s.get(self.config['logout_api'])
-        self.s = requests.session()
+        self.s = requests.Session()
         self.s.headers.update(headers)
         data = self.s.get(self.config['login_page'])
 
@@ -64,9 +67,9 @@ class YHTrader(WebTrader):
         if len(accounts) < 2:
             raise Exception('无法获取沪深 A 股账户: %s' % accounts)
         for account in accounts:
-            if account['交易市场'] == '深A':
+            if account['交易市场'] == '深A' and account['股东代码'].startswith('0'):
                 self.exchange_stock_account['0'] = account['股东代码'][0:10]
-            else:
+            elif account['交易市场'] == '沪A' and account['股东代码'].startswith('A'):
                 self.exchange_stock_account['1'] = account['股东代码'][0:10]
         return login_status
 
@@ -74,7 +77,7 @@ class YHTrader(WebTrader):
         """获取并识别返回的验证码
         :return:失败返回 False 成功返回 验证码"""
         # 获取验证码
-        verify_code_response = self.s.get(self.config['verify_code_api'], params=dict(randomStamp=random.random()))
+        verify_code_response = self.s.get(self.config['verify_code_api'], params=dict(updateverify=random.random()))
         # 保存验证码
         image_path = os.path.join(os.getcwd(), 'vcode')
         with open(image_path, 'wb') as f:
@@ -97,6 +100,12 @@ class YHTrader(WebTrader):
             trdpwd=self.account_config['trdpwd'],
             checkword=verify_code
         )
+
+        if self.account_config.get('orgid'):
+            login_params['orgid'] = self.account_config.get('orgid')
+        if self.account_config.get('inputtype'):
+            login_params['inputtype'] = self.account_config.get('inputtype')
+
         log.debug('login params: %s' % login_params)
         login_response = self.s.post(self.config['login_api'], params=login_params)
         log.debug('login response: %s' % login_response.text)
@@ -105,14 +114,12 @@ class YHTrader(WebTrader):
             return True, None
         return False, login_response.text
 
-    @property
-    def token(self):
-        return self.cookie['JSESSIONID']
-
-    @token.setter
-    def token(self, token):
-        self.cookie = dict(JSESSIONID=token)
-        self.keepalive()
+    def _prepare_account(self, user, password, **kwargs):
+        self.account_config = {
+            'inputaccount': user,
+            'trdpwd': password
+        }
+        self.account_config.update(**kwargs)
 
     def check_available_cancels(self, parsed=True):
         """
@@ -132,41 +139,40 @@ class YHTrader(WebTrader):
             pattern = r'<td\s(?:[a-zA-Z0-9=_\"\:]*)>([\S]+)</td>'
             parsed_data = re.findall(pattern, result1)
             cancel_list = slice_list(step=12, data_list=parsed_data)
-            # print(cancel_list)
         except Exception as e:
             return []
-        if parsed == True:
-            result = list()
+        result = list()
+        if parsed:
             for item in cancel_list:
                 if len(item) == 12:
                     item_dict = {
-                        "time": item[0]
-                        , "code": item[1]
-                        , "name": item[2]
-                        , "status": item[3]
-                        , "iotype": item[4]
-                        , "price": float(item[5])
-                        , "volume": int(item[6])
-                        , "entrust_num": item[7]
-                        , "trans_vol": int(item[8])
-                        , "canceled_vol": int(item[9])
-                        , "investor_code": item[10]
-                        , "account": item[11]
+                        "time": item[0],
+                        "code": item[1],
+                        "name": item[2],
+                        "status": item[3],
+                        "iotype": item[4],
+                        "price": float(item[5]),
+                        "volume": int(item[6]),
+                        "entrust_num": item[7],
+                        "trans_vol": int(item[8]),
+                        "canceled_vol": int(item[9]),
+                        "investor_code": item[10],
+                        "account": item[11]
                     }
                 elif len(item) == 11:
                     item_dict = {
-                        "time": item[0]
-                        , "code": item[1]
-                        , "name": item[2]
-                        , "status": item[3]
-                        , "iotype": ""
-                        , "price": float(item[4])
-                        , "volume": int(item[5])
-                        , "entrust_num": item[6]
-                        , "trans_vol": int(item[7])
-                        , "canceled_vol": int(item[8])
-                        , "investor_code": item[9]
-                        , "account": item[10]
+                        "time": item[0],
+                        "code": item[1],
+                        "name": item[2],
+                        "status": item[3],
+                        "iotype": "",
+                        "price": float(item[4]),
+                        "volume": int(item[5]),
+                        "entrust_num": item[6],
+                        "trans_vol": int(item[7]),
+                        "canceled_vol": int(item[8]),
+                        "investor_code": item[9],
+                        "account": item[10]
                     }
                 else:
                     continue
@@ -211,16 +217,16 @@ class YHTrader(WebTrader):
             else:
                 num = len(item)
             cancel_data = {
-                "ajaxFlag": "stock_batch_cancel"
-                , "num": num
-                , "orderSno": ",".join(item)
+                "ajaxFlag": "stock_batch_cancel",
+                "num": num,
+                "orderSno": ",".join(item)
             }
             while True:
                 try:
                     cancel_response = self.s.post(
-                        "https://www.chinastock.com.cn/trade/AjaxServlet"
-                        , data=cancel_data
-                        , timeout=1
+                        "https://www.chinastock.com.cn/trade/AjaxServlet",
+                        data=cancel_data,
+                        timeout=1,
                     )
                     if cancel_response.status_code == 200:
                         cancel_response_json = cancel_response.json()
@@ -245,6 +251,31 @@ class YHTrader(WebTrader):
         获取当日成交列表.
         """
         return self.do(self.config['current_deal'])
+
+    def get_his_deal(self, bgd, edd):
+        """
+         <905266420@qq.com>
+        获取历史时间段内的全部成交列表
+            e.g.: get_deal( bgd="2016-07-14", edd="2016-08-14" )
+            遇到提示“系统超时请重新登录”或者https返回状态码非200或者其他异常情况会返回False
+        """
+        data = {
+            "sdate": bgd,
+            "edate": edd
+        }
+
+        try:
+            response = self.s.post("https://www.chinastock.com.cn/trade/webtrade/stock/stock_cj_query.jsp", data=data,
+                                   cookies=self.cookie)
+            if response.status_code != 200:
+                return False
+            if response.text.find("重新登录") != -1:
+                return False
+            res = self.format_response_data(response.text)
+            return res
+        except Exception as e:
+            log.warning("撤单出错".format(e))
+            return False
 
     def get_deal(self, date=None):
         """
@@ -275,44 +306,52 @@ class YHTrader(WebTrader):
             log.warning("撤单出错".format(e))
             return False
 
-    def buy(self, stock_code, price, amount=0, volume=0, entrust_prop=EntrustProp.Limit):
+    def buy(self, stock_code, price, amount=0, volume=0, entrust_prop='limit'):
         """买入股票
         :param stock_code: 股票代码
         :param price: 买入价格
         :param amount: 买入股数
         :param volume: 买入总金额 由 volume / price 取整， 若指定 price 则此参数无效
-        :param entrust_prop: 委托类型
+        :param entrust_prop: 委托类型 'limit' 限价单 , 'market'　市价单, 'market_cancel' 五档即时成交剩余转限制
         """
         market_type = helpers.get_stock_type(stock_code)
-        if entrust_prop == EntrustProp.Limit:
+        bsflag = None
+        if entrust_prop == 'limit':
             bsflag = '0B'
+        elif entrust_prop == 'market_cancel':
+            bsflag = '0d'
         elif market_type == 'sh':
             bsflag = '0q'
         elif market_type == 'sz':
             bsflag = '0a'
+        assert bsflag is not None
 
         params = dict(
             self.config['buy'],
             bsflag=bsflag,
-            qty=amount if amount else volume // price // 100 * 100
+            qty=int(amount) if amount else volume // price // 100 * 100
         )
         return self.__trade(stock_code, price, entrust_prop=entrust_prop, other=params)
 
-    def sell(self, stock_code, price, amount=0, volume=0, entrust_prop=EntrustProp.Limit):
+    def sell(self, stock_code, price, amount=0, volume=0, entrust_prop='limit'):
         """卖出股票
         :param stock_code: 股票代码
         :param price: 卖出价格
         :param amount: 卖出股数
         :param volume: 卖出总金额 由 volume / price 取整， 若指定 amount 则此参数无效
-        :param entrust_prop: 委托类型
+        :param entrust_prop: str 委托类型 'limit' 限价单 , 'market'　市价单, 'market_cancel' 五档即时成交剩余转限制
         """
         market_type = helpers.get_stock_type(stock_code)
-        if entrust_prop == EntrustProp.Limit:
+        bsflag = None
+        if entrust_prop == 'limit':
             bsflag = '0S'
+        elif entrust_prop == 'market_cancel':
+            bsflag = '0i'
         elif market_type == 'sh':
             bsflag = '0r'
         elif market_type == 'sz':
             bsflag = '0f'
+        assert bsflag is not None
 
         params = dict(
             self.config['sell'],
@@ -406,7 +445,7 @@ class YHTrader(WebTrader):
         need_info = self.__get_trade_need_info(stock_code)
         trade_params = dict(
             other,
-            stockCode=stock_code,
+            stockCode=stock_code[-6:],
             price=price,
             market=need_info['exchange_type'],
             secuid=need_info['stock_account']
@@ -415,6 +454,7 @@ class YHTrader(WebTrader):
         log.debug("{}".format(self.config['trade_api']))
         log.debug("{}".format(trade_params))
         log.debug('trade response: %s' % trade_response.text)
+        time.sleep(0.5)  # 避免银河 '请求频繁，请稍后再试' 的错误
         return trade_response.json()
 
     def __get_trade_need_info(self, stock_code):
@@ -453,7 +493,7 @@ class YHTrader(WebTrader):
             return r.text
 
     def format_response_data(self, data):
-        if data == False:
+        if not data:
             return False
         # 需要对于银河持仓情况特殊处理
         if data.find('yhposition') != -1:
@@ -469,7 +509,8 @@ class YHTrader(WebTrader):
         else:
             # 获取原始data的html源码并且解析得到一个可读json格式
             search_result_name = re.findall(r'<td nowrap=\"nowrap\" class=\"head(?:\w{0,5})\">(.*)</td>', data)
-            search_result_content = re.findall(r'<td nowrap=\"nowrap\">(.*)&nbsp;</td>', data)
+            search_result_content = re.findall(r'<td nowrap=\"nowrap\">([^～]*?)</td>', data)
+            search_result_content = list(map(lambda x: x.replace('&nbsp', '').replace(';', ''), search_result_content))
 
         col_len = len(search_result_name)
         if col_len == 0 or len(search_result_content) % col_len != 0:
@@ -489,15 +530,16 @@ class YHTrader(WebTrader):
         return self.format_response_data_type(res)
 
     def check_account_live(self, response):
-        if hasattr(response, 'get') and response.get('error_no') == '-1':
-            self.heart_active = False
+        if hasattr(response, 'get'):
+            if response.get('error_no') == '-1' or response.get('result_type') == 'error':
+                self.heart_active = False
+                raise NotLoginError(response.get('result_msg'))
 
     def heartbeat(self):
         heartbeat_params = dict(
             ftype='bsn'
         )
         res = self.s.post(self.config['heart_beat'], params=heartbeat_params)
-        # log.debug( "Heart Beat Response: {}".format(res.text) )
 
     def unlockscreen(self):
         unlock_params = dict(
@@ -508,3 +550,82 @@ class YHTrader(WebTrader):
         log.debug('unlock params: %s' % unlock_params)
         unlock_resp = self.s.post(self.config['unlock'], params=unlock_params)
         log.debug('unlock resp: %s' % unlock_resp.text)
+
+    def get_ipo_info(self):
+        """
+        查询新股申购信息
+        :return: (df_taoday_ipo, df_ipo_limit), 分别是当日新股申购列表信息， 申购额度。
+        df_today_ipo
+            代码	名称	价格	账户额度	申购下限	申购上限	证券账号	交易所	发行日期
+        0	2830	名雕股份	16.53	17500	500	xxxxx	xxxxxxxx	深A	20161201
+        1	732098	森特申购	9.18	27000	1000	xxxxx	xxxxxxx	沪A	20161201
+
+        df_ipo_limit:
+            市场	证券账号	账户额度
+        0	深圳	xxxxxxx	xxxxx
+        1	上海	xxxxxxx	xxxxx
+
+        """
+        import pandas as pd
+        from bs4 import BeautifulSoup
+
+        ipo_response = self.s.get(
+            self.config['ipo_api'],
+            params=dict(),
+            headers={
+                "Accept": "*/*",
+                "Accept-Encoding": "gzip, deflate",
+                "Accept-Language": "zh-CN",
+                "Connection": "Keep-Alive",
+                "Host": "www.chinastock.com.cn",
+                "Referer": "https://www.chinastock.com.cn/trade/webtrade/login.jsp",
+                "User-Agent": "Mozilla/4.0(compatible;MSIE,7.0;Windows NT 10.0; WOW64;Trident / 7.0;.NET4.0C;.NET4.0E;.NET CLR2.0.50727;.NET CLR 3.0.30729;.NET CLR 3.5.30729;InfoPath.3)"
+            })
+        if ipo_response.status_code != 200:
+            return None, None
+        html = ipo_response.content
+        soup = BeautifulSoup(html, 'lxml')
+        tables = soup.findAll('table', attrs={'class': 'fee'})
+        df_ipo_limit = pd.read_html(str(tables[0]), flavor='lxml', header=0, encoding='utf-8')[0]
+        df_today_ipo = pd.read_html(str(tables[1]), flavor='lxml', header=0, encoding='utf-8')[0]
+        df_today_ipo[['代码']] = df_today_ipo[['代码']].applymap(lambda x: '{:0>6}'.format(x))
+        return df_today_ipo, df_ipo_limit
+
+    def get_ipo_limit(self, stock_code):
+        """
+        查询当日某只新股申购额度、申购上限、价格。
+        仅为了兼容佣金宝同名方法。 不需要兼容，最好使用get_ipo_info()[0]
+        :param stock_code: 申购代码!!!
+        :return: high_amount(最高申购股数) enable_amount(申购额度) last_price(发行价)
+
+        """
+        (df1, df2) = self.get_ipo_info()
+        if df1 is None:
+            log.debug('查询错误: %s')
+            return None
+        df = df1[df1['代码'] == stock_code]
+        if len(df) == 0:
+            return dict()
+        ser = df.iloc[0]
+        return dict(high_amount=int(ser['申购上限']), enable_amount=int(ser['账户额度']),
+                    last_price=float(ser['价格']))
+
+    def auto_ipo(self):
+        """
+        自动打新
+        :return: list(dict) dict 格式为 {'申购股票': 申购返回结果}
+        """
+        ipo_info, _ = self.get_ipo_info()
+        ipo_info.fillna(0, inplace=True)
+
+        res = []
+        for _, row in ipo_info.iterrows():
+            if row['账户额度'] <= 0:
+                continue
+
+            ipo_amount = min(row['账户额度'], row['申购上限'])
+            response = self.buy(row['代码'], row['价格'], ipo_amount)
+            res.append({
+                row['名称']: response
+            })
+        return res
